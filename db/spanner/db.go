@@ -32,7 +32,9 @@ import (
 	"github.com/pingcap/go-ycsb/pkg/prop"
 	"github.com/pingcap/go-ycsb/pkg/util"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/magiconair/properties"
 	"github.com/pingcap/go-ycsb/pkg/ycsb"
@@ -57,6 +59,20 @@ type contextKey string
 const stateKey = contextKey("spannerDB")
 
 type spannerState struct {
+}
+
+func formatRPCError(op string, err error, details string) error {
+	if err == nil {
+		return nil
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return fmt.Errorf("spanner %s failed (%s): %w", op, details, err)
+	}
+	if st.Code() == codes.OK {
+		return fmt.Errorf("spanner %s failed (%s): %s", op, details, st.Message())
+	}
+	return fmt.Errorf("spanner %s failed (%s): code=%s message=%q err=%w", op, details, st.Code(), st.Message(), err)
 }
 
 func (c spannerCreator) Create(p *properties.Properties) (ycsb.DB, error) {
@@ -247,7 +263,7 @@ func (db *spannerDB) queryRows(ctx context.Context, stmt spanner.Statement, coun
 		}
 
 		if err != nil {
-			return nil, err
+			return nil, formatRPCError("query next", err, fmt.Sprintf("sql=%q params=%v", stmt.SQL, stmt.Params))
 		}
 
 		rowSize := row.Size()
@@ -259,7 +275,7 @@ func (db *spannerDB) queryRows(ctx context.Context, stmt spanner.Statement, coun
 		}
 
 		if err := row.Columns(dest...); err != nil {
-			return nil, err
+			return nil, formatRPCError("query decode", err, fmt.Sprintf("sql=%q params=%v", stmt.SQL, stmt.Params))
 		}
 
 		for i := 0; i < rowSize; i++ {
@@ -294,7 +310,7 @@ func (db *spannerDB) Read(ctx context.Context, table string, key string, fields 
 		return nil, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, formatRPCError("read next", err, fmt.Sprintf("table=%s key=%q fields=%v", table, key, fields))
 	}
 
 	rowSize := row.Size()
@@ -305,7 +321,7 @@ func (db *spannerDB) Read(ctx context.Context, table string, key string, fields 
 	}
 
 	if err := row.Columns(dest...); err != nil {
-		return nil, err
+		return nil, formatRPCError("read decode", err, fmt.Sprintf("table=%s key=%q fields=%v", table, key, fields))
 	}
 
 	for i := 0; i < rowSize; i++ {
@@ -353,20 +369,20 @@ func (db *spannerDB) Update(ctx context.Context, table string, key string, mutat
 	keys, values := createMutations(key, mutations)
 	m := spanner.Update(table, keys, values)
 	_, err := db.client.Apply(ctx, []*spanner.Mutation{m})
-	return err
+	return formatRPCError("update", err, fmt.Sprintf("table=%s key=%q columns=%v mutation_fields=%d", table, key, keys, len(mutations)))
 }
 
 func (db *spannerDB) Insert(ctx context.Context, table string, key string, mutations map[string][]byte) error {
 	keys, values := createMutations(key, mutations)
 	m := spanner.InsertOrUpdate(table, keys, values)
 	_, err := db.client.Apply(ctx, []*spanner.Mutation{m})
-	return err
+	return formatRPCError("insert", err, fmt.Sprintf("table=%s key=%q columns=%v mutation_fields=%d", table, key, keys, len(mutations)))
 }
 
 func (db *spannerDB) Delete(ctx context.Context, table string, key string) error {
 	m := spanner.Delete(table, spanner.Key{key})
 	_, err := db.client.Apply(ctx, []*spanner.Mutation{m})
-	return err
+	return formatRPCError("delete", err, fmt.Sprintf("table=%s key=%q", table, key))
 }
 
 func init() {
