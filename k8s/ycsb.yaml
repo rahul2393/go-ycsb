@@ -1,0 +1,60 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  namespace: spanner-ns
+  name: ycsb-irahul-run-go
+spec:
+  parallelism: 1
+  completions: 1
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: ycsb-irahul-run-go
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ycsb-irahul-client
+          image: "us-west1-docker.pkg.dev/outbound-flight/spanner-box/ycsb-go-client:latest"
+          imagePullPolicy: Always
+          env:
+            - name: ENDPOINT
+              value: "spanner.spanner-ns:15000"
+            - name: SPANNER_NUM_CHANNELS
+              value: "1"
+#            - name: GRPC_GO_LOG_VERBOSITY_LEVEL
+#              value: "99"
+#            - name: GRPC_GO_LOG_SEVERITY_LEVEL
+#              value: "info"
+            - name: SPANNER_DISABLE_BUILTIN_METRICS
+              value: "true"
+          resources:
+            requests:
+              cpu: "7"
+              memory: "25Gi"
+            limits:
+              cpu: "7"
+              memory: "25Gi"
+          command: ["/app/go-ycsb"]
+          args:
+            - "run"
+            - "spanner"
+            - "-P"
+            - "workloads/workloadb"
+            - "-p"
+            - "spanner.db=projects/default/instances/default/databases/ycsbdb"
+            - "-p"
+            - "recordcount=1000000000000"
+            - "-p"
+            - "zeropadding=20"
+            - "-p"
+            - "insertorder=ordered"
+            - "-p"
+            - "operationcount=1000000000000"
+            - "-p"
+            - "maxexecutiontime=18000"
+            - "-p"
+            - "threadcount=100"
+            - "-p"
+            - "requestdistribution=zipfian"

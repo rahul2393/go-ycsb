@@ -1,0 +1,39 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  namespace: spanner-ns
+  name: ycsb-irahul-load-go
+spec:
+  parallelism: 1
+  completions: 1
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: ycsb-irahul-load-go
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ycsb-irahul-client
+          image: "us-west1-docker.pkg.dev/outbound-flight/spanner-box/ycsb-go-client:latest"
+          imagePullPolicy: Always
+          env:
+            - name: ENDPOINT
+              value: "spanner.spanner-ns:15000"
+            - name: SPANNER_DISABLE_BUILTIN_METRICS
+              value: "true"
+          command: ["/app/go-ycsb"]
+          args:
+            - "load"
+            - "spanner"
+            - "-P"
+            - "workloads/workloadb"
+            - "-p"
+            - "spanner.db=projects/default/instances/default/databases/goycsbdb"
+            - "-p"
+            - "recordcount=1000000"
+            - "-p"
+            - "threadcount=128"
+            - "-p"
+            - "requestdistribution=zipfian"
