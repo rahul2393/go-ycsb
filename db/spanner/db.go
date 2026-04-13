@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 
@@ -68,12 +69,16 @@ func (c spannerCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 		return nil, fmt.Errorf("must provide a database like projects/xxxx/instances/xxxx/databases/xxx")
 	}
 	// client, err := spanner.NewClient(ctx, dbName)
+	endpoint := os.Getenv("ENDPOINT")
+	if endpoint == "" {
+		endpoint = "localhost:15000"
+	}
 
 	opts := []option.ClientOption{
-			option.WithEndpoint("localhost:15000"),
-			option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
-			option.WithoutAuthentication(),
-		}
+		option.WithEndpoint(endpoint),
+		option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
+		option.WithoutAuthentication(),
+	}
 
 	client, err := spanner.NewClientWithConfig(ctx, dbName, spanner.ClientConfig{IsExperimentalHost: true}, opts...)
 	if err != nil {
@@ -259,25 +264,45 @@ func (db *spannerDB) queryRows(ctx context.Context, stmt spanner.Statement, coun
 }
 
 func (db *spannerDB) Read(ctx context.Context, table string, key string, fields []string) (map[string][]byte, error) {
-	var query string
 	if len(fields) == 0 {
-		query = fmt.Sprintf(`SELECT * FROM %s WHERE YCSB_KEY = @key`, table)
-	} else {
-		query = fmt.Sprintf(`SELECT %s FROM %s WHERE YCSB_KEY = @key`, strings.Join(fields, ","), table)
+		fieldCount := db.p.GetInt64(prop.FieldCount, prop.FieldCountDefault)
+		fields = make([]string, 0, 1+fieldCount)
+		fields = append(fields, "id")
+		for i := int64(0); i < fieldCount; i++ {
+			fields = append(fields, fmt.Sprintf("field%d", i))
+		}
 	}
 
-	stmt := spanner.NewStatement(query)
-	stmt.Params["key"] = key
+	keySet := spanner.Key{key}
+	iter := db.client.Single().Read(ctx, table, keySet, fields)
+	defer iter.Stop()
 
-	rows, err := db.queryRows(ctx, stmt, 1)
-
-	if err != nil {
-		return nil, err
-	} else if len(rows) == 0 {
+	row, err := iter.Next()
+	if err == iterator.Done {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, err
+	}
+	rowSize := row.Size()
+	m := make(map[string][]byte, rowSize)
+	dest := make([]interface{}, rowSize)
+	for i := 0; i < rowSize; i++ {
+		dest[i] = new(spanner.NullString)
+	}
 
-	return rows[0], nil
+	if err := row.Columns(dest...); err != nil {
+		return nil, err
+	}
+
+	for i := 0; i < rowSize; i++ {
+		v := dest[i].(*spanner.NullString)
+		if v.Valid {
+			m[row.ColumnName(i)] = util.Slice(v.StringVal)
+		}
+	}
+
+	return m, nil
 }
 
 func (db *spannerDB) Scan(ctx context.Context, table string, startKey string, count int, fields []string) ([]map[string][]byte, error) {
