@@ -4,8 +4,8 @@ metadata:
   namespace: spanner-ns
   name: go-ycsb-zipfian
 spec:
-  completions: 200
-  parallelism: 200
+  completions: 20
+  parallelism: 20
   completionMode: Indexed
   backoffLimit: 0
   activeDeadlineSeconds: 18000
@@ -22,24 +22,36 @@ spec:
         - name: go-ycsb
           image: us-west1-docker.pkg.dev/outbound-flight/spanner-box/ycsb-go-client:latest
           imagePullPolicy: Always
-          command: ["/bin/sh", "-ec"]
+          command: ["/app/go-ycsb"]
           args:
-            - |
-              ordinal="${JOB_COMPLETION_INDEX}"
-              exec /usr/bin/dumb-init -- /app/go-ycsb run spanner \
-                -P workloads/workloadb \
-                -p spanner.db=projects/default/instances/default/databases/ycsbdb \
-                -p recordcount=1000000000000 \
-                -p zeropadding=20 \
-                -p insertorder=ordered \
-                -p operationcount=1000000000000 \
-                -p threadcount=100 \
-                -p target=1000 \
-                -p maxexecutiontime=18000 \
-                -p requestdistribution=zipfian \
-                -p requestpartition.count=200 \
-                -p requestpartition.index="${ordinal}" \
-                -p requestpartition.size=100000000
+            - "run"
+            - "spanner"
+            - "-P"
+            - "workloads/workloadb"
+            - "-p"
+            - "spanner.db=projects/default/instances/default/databases/ycsbdb"
+            - "-p"
+            - "recordcount=1000000000000"
+            - "-p"
+            - "zeropadding=20"
+            - "-p"
+            - "insertorder=ordered"
+            - "-p"
+            - "operationcount=1000000000000"
+            - "-p"
+            - "threadcount=100"
+            - "-p"
+            - "target=1000"
+            - "-p"
+            - "maxexecutiontime=18000"
+            - "-p"
+            - "requestdistribution=zipfian"
+            - "-p"
+            - "requestpartition.count=20"
+            - "-p"
+            - "requestpartition.index=$(JOB_COMPLETION_INDEX)"
+            - "-p"
+            - "requestpartition.size=100000000"
           env:
             - name: JOB_COMPLETION_INDEX
               valueFrom:
