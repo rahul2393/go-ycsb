@@ -67,14 +67,20 @@ const (
 	ReadModifyWriteProportion        = "readmodifywriteproportion"
 	ReadModifyWriteProportionDefault = float64(0.0)
 	// "uniform", "zipfian", "latest"
-	RequestDistribution        = "requestdistribution"
-	RequestDistributionDefault = "uniform"
-	ZeroPadding                = "zeropadding"
-	ZeroPaddingDefault         = int64(12)
-	MinScanLength              = "minscanlength"
-	MinScanLengthDefault       = int64(1)
-	MaxScanLength              = "maxscanlength"
-	MaxScanLengthDefault       = int64(1000)
+	RequestDistribution          = "requestdistribution"
+	RequestDistributionDefault   = "uniform"
+	RequestPartitionCount        = "requestpartition.count"
+	RequestPartitionIndex        = "requestpartition.index"
+	RequestPartitionSize         = "requestpartition.size"
+	RequestPartitionCountDefault = int64(1)
+	RequestPartitionIndexDefault = int64(0)
+	RequestPartitionSizeDefault  = int64(0)
+	ZeroPadding                  = "zeropadding"
+	ZeroPaddingDefault           = int64(12)
+	MinScanLength                = "minscanlength"
+	MinScanLengthDefault         = int64(1)
+	MaxScanLength                = "maxscanlength"
+	MaxScanLengthDefault         = int64(1000)
 	// "uniform", "zipfian"
 	ScanLengthDistribution        = "scanlengthdistribution"
 	ScanLengthDistributionDefault = "uniform"

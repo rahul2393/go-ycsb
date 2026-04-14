@@ -1,7 +1,7 @@
 module github.com/pingcap/go-ycsb
 
 require (
-	cloud.google.com/go/spanner v1.89.0
+	cloud.google.com/go/spanner v1.90.0
 	github.com/HdrHistogram/hdrhistogram-go v1.1.2
 	github.com/XiaoMi/pegasus-go-client v0.0.0-20181029071519-9400942c5d1c
 	github.com/aerospike/aerospike-client-go v1.35.2
@@ -173,5 +173,3 @@ require (
 replace github.com/apache/thrift => github.com/apache/thrift v0.0.0-20171203172758-327ebb6c2b6d
 
 go 1.25.0
-
-replace cloud.google.com/go/spanner => /Users/irahul/go/src/github.com/rahul2393/google-cloud-go/spanner

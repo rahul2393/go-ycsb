@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  namespace: spanner-ns
+  name: go-ycsb-zipfian
+spec:
+  completions: 200
+  parallelism: 200
+  completionMode: Indexed
+  backoffLimit: 0
+  activeDeadlineSeconds: 18000
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: go-ycsb-zipfian
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        iam.gke.io/gke-metadata-server-enabled: "true"
+      containers:
+        - name: go-ycsb
+          image: us-west1-docker.pkg.dev/outbound-flight/spanner-box/ycsb-go-client:latest
+          imagePullPolicy: Always
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              ordinal="${JOB_COMPLETION_INDEX}"
+              exec /usr/bin/dumb-init -- /app/go-ycsb run spanner \
+                -P workloads/workloadb \
+                -p spanner.db=projects/default/instances/default/databases/ycsbdb \
+                -p recordcount=1000000000000 \
+                -p zeropadding=20 \
+                -p insertorder=ordered \
+                -p operationcount=1000000000000 \
+                -p threadcount=100 \
+                -p target=1000 \
+                -p maxexecutiontime=18000 \
+                -p requestdistribution=zipfian \
+                -p requestpartition.count=200 \
+                -p requestpartition.index="${ordinal}" \
+                -p requestpartition.size=100000000
+          env:
+            - name: JOB_COMPLETION_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+            - name: ENDPOINT
+              value: "spanner.spanner-ns:15000"
+            - name: SPANNER_DISABLE_BUILTIN_METRICS
+              value: "true"

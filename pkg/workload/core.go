@@ -600,6 +600,52 @@ func (c *core) doBatchTransactionUpdate(ctx context.Context, batchSize int, db y
 	return db.BatchUpdate(ctx, c.table, keys, values)
 }
 
+func requestPartitionRange(lowerBound int64, upperBound int64, partitionCount int64, partitionIndex int64, partitionSize int64) (int64, int64, string) {
+	if upperBound < lowerBound {
+		util.Fatalf("invalid key range [%d %d]", lowerBound, upperBound)
+	}
+
+	originalUpperBound := upperBound
+	if partitionCount < 1 {
+		util.Fatalf("%s (%d) must be at least 1", prop.RequestPartitionCount, partitionCount)
+	}
+	if partitionSize < 0 {
+		util.Fatalf("%s (%d) must be non-negative", prop.RequestPartitionSize, partitionSize)
+	}
+	if partitionCount == 1 {
+		return lowerBound, upperBound, "disabled"
+	}
+
+	if partitionIndex < 0 || partitionIndex >= partitionCount {
+		util.Fatalf("%s (%d) must be within [0, %d)", prop.RequestPartitionIndex, partitionIndex, partitionCount)
+	}
+
+	totalKeys := upperBound - lowerBound + 1
+	if partitionSize > 0 {
+		totalShards := (totalKeys + partitionSize - 1) / partitionSize
+		if partitionCount > totalShards {
+			util.Fatalf("%s (%d) cannot exceed shard count %d for %s=%d over key range [%d %d]",
+				prop.RequestPartitionCount, partitionCount, totalShards, prop.RequestPartitionSize, partitionSize, lowerBound, upperBound)
+		}
+
+		shardIndex := int64(0)
+		if partitionCount > 1 && totalShards > 1 {
+			shardIndex = partitionIndex * (totalShards - 1) / (partitionCount - 1)
+		}
+
+		lowerBound = lowerBound + shardIndex*partitionSize
+		upperBound = lowerBound + partitionSize - 1
+		if upperBound > originalUpperBound {
+			upperBound = originalUpperBound
+		}
+		return lowerBound, upperBound, fmt.Sprintf("fixed-size shard %d/%d (shard=%d size=%d)", partitionIndex, partitionCount, shardIndex, partitionSize)
+	}
+
+	partitionLowerBound := lowerBound + partitionIndex*totalKeys/partitionCount
+	partitionUpperBound := lowerBound + (partitionIndex+1)*totalKeys/partitionCount - 1
+	return partitionLowerBound, partitionUpperBound, fmt.Sprintf("contiguous partition %d/%d", partitionIndex, partitionCount)
+}
+
 // CoreCreator creates the Core workload.
 type coreCreator struct {
 }
@@ -650,33 +696,51 @@ func (coreCreator) Create(p *properties.Properties) (ycsb.Workload, error) {
 	c.operationChooser = createOperationGenerator(p)
 	var keyrangeLowerBound int64 = insertStart
 	var keyrangeUpperBound int64 = insertStart + insertCount - 1
+	partitionCount := p.GetInt64(prop.RequestPartitionCount, prop.RequestPartitionCountDefault)
+	partitionIndex := p.GetInt64(prop.RequestPartitionIndex, prop.RequestPartitionIndexDefault)
+	partitionSize := p.GetInt64(prop.RequestPartitionSize, prop.RequestPartitionSizeDefault)
+	partitionEnabled := partitionCount > 1
+	partitionDesc := "disabled"
 
 	c.transactionInsertKeySequence = generator.NewAcknowledgedCounter(c.recordCount)
 	switch requestDistrib {
 	case "uniform":
+		keyrangeLowerBound, keyrangeUpperBound, partitionDesc = requestPartitionRange(keyrangeLowerBound, keyrangeUpperBound, partitionCount, partitionIndex, partitionSize)
 		c.keyChooser = generator.NewUniform(keyrangeLowerBound, keyrangeUpperBound)
 	case "sequential":
+		keyrangeLowerBound, keyrangeUpperBound, partitionDesc = requestPartitionRange(keyrangeLowerBound, keyrangeUpperBound, partitionCount, partitionIndex, partitionSize)
 		c.keyChooser = generator.NewSequential(keyrangeLowerBound, keyrangeUpperBound)
 	case "zipfian":
 		insertProportion := p.GetFloat64(prop.InsertProportion, prop.InsertProportionDefault)
+		if partitionEnabled && insertProportion > 0 {
+			util.Fatalf("%s does not support %s > 0", prop.RequestPartitionCount, prop.InsertProportion)
+		}
 		opCount := p.GetInt64(prop.OperationCount, 0)
 		expectedNewKeys := int64(float64(opCount) * insertProportion * 2.0)
 		keyrangeUpperBound = insertStart + insertCount + expectedNewKeys
+		keyrangeLowerBound, keyrangeUpperBound, partitionDesc = requestPartitionRange(keyrangeLowerBound, keyrangeUpperBound, partitionCount, partitionIndex, partitionSize)
 		c.keyChooser = generator.NewScrambledZipfian(keyrangeLowerBound, keyrangeUpperBound, generator.ZipfianConstant)
 	case "latest":
+		if partitionEnabled {
+			util.Fatalf("%s is not supported with requestdistribution=%s", prop.RequestPartitionCount, requestDistrib)
+		}
 		c.keyChooser = generator.NewSkewedLatest(c.transactionInsertKeySequence)
 	case "hotspot":
+		keyrangeLowerBound, keyrangeUpperBound, partitionDesc = requestPartitionRange(keyrangeLowerBound, keyrangeUpperBound, partitionCount, partitionIndex, partitionSize)
 		hotsetFraction := p.GetFloat64(prop.HotspotDataFraction, prop.HotspotDataFractionDefault)
 		hotopnFraction := p.GetFloat64(prop.HotspotOpnFraction, prop.HotspotOpnFractionDefault)
 		c.keyChooser = generator.NewHotspot(keyrangeLowerBound, keyrangeUpperBound, hotsetFraction, hotopnFraction)
 	case "exponential":
+		if partitionEnabled {
+			util.Fatalf("%s is not supported with requestdistribution=%s", prop.RequestPartitionCount, requestDistrib)
+		}
 		percentile := p.GetFloat64(prop.ExponentialPercentile, prop.ExponentialPercentileDefault)
 		frac := p.GetFloat64(prop.ExponentialFrac, prop.ExponentialFracDefault)
 		c.keyChooser = generator.NewExponential(percentile, float64(c.recordCount)*frac)
 	default:
 		util.Fatalf("unknown request distribution %s", requestDistrib)
 	}
-	fmt.Println(fmt.Sprintf("Using request distribution '%s' a keyrange of [%d %d]", requestDistrib, keyrangeLowerBound, keyrangeUpperBound))
+	fmt.Println(fmt.Sprintf("Using request distribution '%s' keyrange [%d %d] (%s)", requestDistrib, keyrangeLowerBound, keyrangeUpperBound, partitionDesc))
 
 	c.fieldChooser = generator.NewUniform(0, c.fieldCount-1)
 	switch scanLengthDistrib {
