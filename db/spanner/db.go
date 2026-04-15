@@ -53,6 +53,7 @@ const (
 	otelProjectIDEnv          = "OTEL_PROJECT_ID"
 	otelMetricProjectIDEnv    = "OTEL_METRIC_PROJECT_ID"
 	otelServiceNameEnv        = "OTEL_SERVICE_NAME"
+	otelServiceInstanceIDEnv  = "OTEL_SERVICE_INSTANCE_ID"
 	otelExportIntervalEnv     = "OTEL_METRIC_EXPORT_INTERVAL_SECONDS"
 	defaultOTELServiceName    = "go-ycsb-spanner"
 	defaultOTELExportInterval = 10 * time.Second
@@ -85,6 +86,8 @@ type rpcError struct {
 	statusFound bool
 	code        codes.Code
 	message     string
+	retryDelay  time.Duration
+	hasRetry    bool
 	err         error
 }
 
@@ -93,7 +96,13 @@ func (e *rpcError) Error() string {
 		return fmt.Sprintf("spanner %s failed (%s): %v", e.op, e.details, e.err)
 	}
 	if e.code == codes.OK {
+		if e.hasRetry {
+			return fmt.Sprintf("spanner %s failed (%s): %s retry_delay=%s", e.op, e.details, e.message, e.retryDelay)
+		}
 		return fmt.Sprintf("spanner %s failed (%s): %s", e.op, e.details, e.message)
+	}
+	if e.hasRetry {
+		return fmt.Sprintf("spanner %s failed (%s): code=%s message=%q retry_delay=%s err=%v", e.op, e.details, e.code, e.message, e.retryDelay, e.err)
 	}
 	return fmt.Sprintf("spanner %s failed (%s): code=%s message=%q err=%v", e.op, e.details, e.code, e.message, e.err)
 }
@@ -150,6 +159,9 @@ func (e *rpcError) metricName(op string) string {
 
 	if e.statusFound {
 		parts = append(parts, sanitizeMetricToken(e.code.String()), sanitizeMetricToken(e.message))
+		if e.hasRetry {
+			parts = append(parts, "RETRY_DELAY", sanitizeMetricToken(e.retryDelay.String()))
+		}
 	} else {
 		parts = append(parts, "NON_GRPC", sanitizeMetricToken(e.err.Error()))
 	}
@@ -176,6 +188,10 @@ func formatRPCError(op string, err error, details string) error {
 	rpcErr.statusFound = true
 	rpcErr.code = st.Code()
 	rpcErr.message = st.Message()
+	if retryDelay, ok := spanner.ExtractRetryDelay(err); ok {
+		rpcErr.retryDelay = retryDelay
+		rpcErr.hasRetry = true
+	}
 	return rpcErr
 }
 
@@ -225,6 +241,21 @@ func openTelemetryMetricSettingsFromEnv() (projectID string, serviceName string,
 	return projectID, serviceName, interval, true, nil
 }
 
+func openTelemetryServiceInstanceID() string {
+	if value := firstNonEmptyEnv(otelServiceInstanceIDEnv); value != "" {
+		return value
+	}
+
+	host, err := os.Hostname()
+	if err == nil {
+		host = strings.TrimSpace(host)
+	}
+	if host == "" {
+		host = "unknown-host"
+	}
+	return fmt.Sprintf("%s-%d", host, os.Getpid())
+}
+
 func configureOpenTelemetryMetrics(cfg *spanner.ClientConfig) (func(context.Context) error, error) {
 	// Only export metrics when OTEL_PROJECT_ID is set. Keep Spanner's native exporter
 	// disabled so go-ycsb does not emit client metrics implicitly.
@@ -242,6 +273,7 @@ func configureOpenTelemetryMetrics(cfg *spanner.ClientConfig) (func(context.Cont
 		resource.Default(),
 		resource.NewSchemaless(
 			semconv.ServiceNameKey.String(serviceName),
+			semconv.ServiceInstanceIDKey.String(openTelemetryServiceInstanceID()),
 		),
 	)
 	if err != nil {
