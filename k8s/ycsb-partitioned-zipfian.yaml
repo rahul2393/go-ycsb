@@ -59,5 +59,9 @@ spec:
                   fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
             - name: ENDPOINT
               value: "spanner.spanner-ns:15000"
+            - name: OTEL_PROJECT_ID
+              value: "outbound-flight"
+            - name: OTEL_SERVICE_NAME
+              value: "go-ycsb-zipfian"
             - name: SPANNER_DISABLE_BUILTIN_METRICS
               value: "true"

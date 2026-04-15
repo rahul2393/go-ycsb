@@ -22,10 +22,15 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"cloud.google.com/go/spanner"
 	database "cloud.google.com/go/spanner/admin/database/apiv1"
+	mexporter "github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	semconv "go.opentelemetry.io/otel/semconv/v1.37.0"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 
@@ -43,17 +48,28 @@ import (
 )
 
 const (
-	spannerDBName      = "spanner.db"
-	spannerCredentials = "spanner.credentials"
+	spannerDBName             = "spanner.db"
+	spannerCredentials        = "spanner.credentials"
+	otelProjectIDEnv          = "OTEL_PROJECT_ID"
+	otelMetricProjectIDEnv    = "OTEL_METRIC_PROJECT_ID"
+	otelServiceNameEnv        = "OTEL_SERVICE_NAME"
+	otelExportIntervalEnv     = "OTEL_METRIC_EXPORT_INTERVAL_SECONDS"
+	defaultOTELServiceName    = "go-ycsb-spanner"
+	defaultOTELExportInterval = 10 * time.Second
 )
 
 type spannerCreator struct {
 }
 
 type spannerDB struct {
-	p       *properties.Properties
-	client  *spanner.Client
-	verbose bool
+	p              *properties.Properties
+	client         *spanner.Client
+	verbose        bool
+	shutdownMetric func(context.Context) error
+}
+
+var newGoogleCloudMetricExporter = func(projectID string) (sdkmetric.Exporter, error) {
+	return mexporter.New(mexporter.WithProjectID(projectID))
 }
 
 type contextKey string
@@ -176,6 +192,80 @@ func (db *spannerDB) ErrorMetricName(op string, err error) string {
 	return rpcErr.metricName(op)
 }
 
+func firstNonEmptyEnv(keys ...string) string {
+	for _, key := range keys {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func openTelemetryMetricSettingsFromEnv() (projectID string, serviceName string, interval time.Duration, enabled bool, err error) {
+	projectID = firstNonEmptyEnv(otelProjectIDEnv, otelMetricProjectIDEnv)
+	if projectID == "" {
+		return "", "", 0, false, nil
+	}
+
+	serviceName = firstNonEmptyEnv(otelServiceNameEnv)
+	if serviceName == "" {
+		serviceName = defaultOTELServiceName
+	}
+
+	interval = defaultOTELExportInterval
+	if raw := strings.TrimSpace(os.Getenv(otelExportIntervalEnv)); raw != "" {
+		seconds, convErr := strconv.Atoi(raw)
+		if convErr != nil || seconds <= 0 {
+			return "", "", 0, false, fmt.Errorf("invalid %s=%q: must be a positive integer", otelExportIntervalEnv, raw)
+		}
+		interval = time.Duration(seconds) * time.Second
+	}
+
+	return projectID, serviceName, interval, true, nil
+}
+
+func configureOpenTelemetryMetrics(cfg *spanner.ClientConfig) (func(context.Context) error, error) {
+	// Only export metrics when OTEL_PROJECT_ID is set. Keep Spanner's native exporter
+	// disabled so go-ycsb does not emit client metrics implicitly.
+	cfg.DisableNativeMetrics = true
+
+	projectID, serviceName, exportInterval, enabled, err := openTelemetryMetricSettingsFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	if !enabled {
+		return nil, nil
+	}
+
+	res, err := resource.Merge(
+		resource.Default(),
+		resource.NewSchemaless(
+			semconv.ServiceNameKey.String(serviceName),
+		),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	exporter, err := newGoogleCloudMetricExporter(projectID)
+	if err != nil {
+		return nil, err
+	}
+
+	meterProvider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithResource(res),
+		sdkmetric.WithReader(
+			sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(exportInterval)),
+		),
+	)
+
+	cfg.OpenTelemetryMeterProvider = meterProvider
+	cfg.ExportBuiltInMetricsToOpenTelemetry = true
+
+	return meterProvider.Shutdown, nil
+}
+
 func (c spannerCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	d := new(spannerDB)
 	d.p = p
@@ -202,6 +292,10 @@ func (c spannerCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 	cfg := spanner.ClientConfig{
 		IsExperimentalHost: true,
 	}
+	shutdownMetric, err := configureOpenTelemetryMetrics(&cfg)
+	if err != nil {
+		return nil, err
+	}
 
 	if chStr := os.Getenv("SPANNER_NUM_CHANNELS"); chStr != "" {
 		if ch, err := strconv.Atoi(chStr); err == nil && ch > 0 {
@@ -211,9 +305,13 @@ func (c spannerCreator) Create(p *properties.Properties) (ycsb.DB, error) {
 
 	client, err := spanner.NewClientWithConfig(ctx, dbName, cfg, opts...)
 	if err != nil {
+		if shutdownMetric != nil {
+			_ = shutdownMetric(ctx)
+		}
 		return nil, err
 	}
 	d.client = client
+	d.shutdownMetric = shutdownMetric
 	return d, nil
 }
 
@@ -330,12 +428,14 @@ func (db *spannerDB) createTable(ctx context.Context, adminClient *database.Data
 }
 
 func (db *spannerDB) Close() error {
-	if db.client == nil {
-		return nil
+	var err error
+	if db.client != nil {
+		db.client.Close()
 	}
-
-	db.client.Close()
-	return nil
+	if db.shutdownMetric != nil {
+		err = errors.Join(err, db.shutdownMetric(context.Background()))
+	}
+	return err
 }
 
 func (db *spannerDB) InitThread(ctx context.Context, _ int, _ int) context.Context {
