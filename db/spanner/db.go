@@ -16,11 +16,13 @@ package spanner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"cloud.google.com/go/spanner"
 	database "cloud.google.com/go/spanner/admin/database/apiv1"
@@ -61,18 +63,117 @@ const stateKey = contextKey("spannerDB")
 type spannerState struct {
 }
 
+type rpcError struct {
+	op          string
+	details     string
+	statusFound bool
+	code        codes.Code
+	message     string
+	err         error
+}
+
+func (e *rpcError) Error() string {
+	if !e.statusFound {
+		return fmt.Sprintf("spanner %s failed (%s): %v", e.op, e.details, e.err)
+	}
+	if e.code == codes.OK {
+		return fmt.Sprintf("spanner %s failed (%s): %s", e.op, e.details, e.message)
+	}
+	return fmt.Sprintf("spanner %s failed (%s): code=%s message=%q err=%v", e.op, e.details, e.code, e.message, e.err)
+}
+
+func (e *rpcError) Unwrap() error {
+	return e.err
+}
+
+func sanitizeMetricToken(s string) string {
+	var b strings.Builder
+	lastUnderscore := false
+	prevWasLowerOrDigit := false
+
+	for _, r := range s {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r):
+			if unicode.IsUpper(r) && prevWasLowerOrDigit && !lastUnderscore && b.Len() > 0 {
+				b.WriteByte('_')
+			}
+			b.WriteRune(unicode.ToUpper(r))
+			lastUnderscore = false
+			prevWasLowerOrDigit = unicode.IsLower(r) || unicode.IsDigit(r)
+		case !lastUnderscore && b.Len() > 0:
+			b.WriteByte('_')
+			lastUnderscore = true
+			prevWasLowerOrDigit = false
+		default:
+			prevWasLowerOrDigit = false
+		}
+	}
+
+	token := strings.Trim(b.String(), "_")
+	if token == "" {
+		return "UNKNOWN"
+	}
+
+	runes := []rune(token)
+	if len(runes) > 64 {
+		token = strings.Trim(string(runes[:64]), "_")
+	}
+	if token == "" {
+		return "UNKNOWN"
+	}
+	return token
+}
+
+func (e *rpcError) metricName(op string) string {
+	parts := []string{
+		sanitizeMetricToken(op),
+		"ERROR",
+		"SPANNER",
+		sanitizeMetricToken(e.op),
+	}
+
+	if e.statusFound {
+		parts = append(parts, sanitizeMetricToken(e.code.String()), sanitizeMetricToken(e.message))
+	} else {
+		parts = append(parts, "NON_GRPC", sanitizeMetricToken(e.err.Error()))
+	}
+
+	return strings.Join(parts, "_")
+}
+
 func formatRPCError(op string, err error, details string) error {
 	if err == nil {
 		return nil
 	}
+
+	rpcErr := &rpcError{
+		op:      op,
+		details: details,
+		err:     err,
+	}
+
 	st, ok := status.FromError(err)
 	if !ok {
-		return fmt.Errorf("spanner %s failed (%s): %w", op, details, err)
+		return rpcErr
 	}
-	if st.Code() == codes.OK {
-		return fmt.Errorf("spanner %s failed (%s): %s", op, details, st.Message())
+
+	rpcErr.statusFound = true
+	rpcErr.code = st.Code()
+	rpcErr.message = st.Message()
+	return rpcErr
+}
+
+func (db *spannerDB) ErrorMetricName(op string, err error) string {
+	if op != "READ" {
+		return ""
 	}
-	return fmt.Errorf("spanner %s failed (%s): code=%s message=%q err=%w", op, details, st.Code(), st.Message(), err)
+
+	var rpcErr *rpcError
+	if !errors.As(err, &rpcErr) {
+		return ""
+	}
+
+	return rpcErr.metricName(op)
 }
 
 func (c spannerCreator) Create(p *properties.Properties) (ycsb.DB, error) {

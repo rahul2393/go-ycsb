@@ -102,6 +102,12 @@ type AnalyzeDB interface {
 	Analyze(ctx context.Context, table string) error
 }
 
+// ErrorMetricNamer can provide a more specific metric name for a failed operation.
+// Implementations should return an empty string when no extra classification is available.
+type ErrorMetricNamer interface {
+	ErrorMetricName(op string, err error) string
+}
+
 var dbCreators = map[string]DBCreator{}
 
 // RegisterDBCreator registers a creator for the database
