@@ -21,6 +21,8 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -94,6 +96,47 @@ var (
 	globalProps    *properties.Properties
 )
 
+const (
+	pprofMutexFractionEnv = "PPROF_MUTEX_FRACTION"
+	pprofBlockRateEnv     = "PPROF_BLOCK_RATE"
+)
+
+type runtimeProfileConfig struct {
+	mutexFraction int
+	blockRate     int
+}
+
+func parseRuntimeProfileConfigFromEnv() (runtimeProfileConfig, error) {
+	cfg := runtimeProfileConfig{}
+
+	if raw := strings.TrimSpace(os.Getenv(pprofMutexFractionEnv)); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			return runtimeProfileConfig{}, fmt.Errorf("invalid %s=%q: must be a non-negative integer", pprofMutexFractionEnv, raw)
+		}
+		cfg.mutexFraction = value
+	}
+
+	if raw := strings.TrimSpace(os.Getenv(pprofBlockRateEnv)); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			return runtimeProfileConfig{}, fmt.Errorf("invalid %s=%q: must be a non-negative integer", pprofBlockRateEnv, raw)
+		}
+		cfg.blockRate = value
+	}
+
+	return cfg, nil
+}
+
+func applyRuntimeProfileConfig(cfg runtimeProfileConfig) {
+	if cfg.mutexFraction > 0 {
+		runtime.SetMutexProfileFraction(cfg.mutexFraction)
+	}
+	if cfg.blockRate > 0 {
+		runtime.SetBlockProfileRate(cfg.blockRate)
+	}
+}
+
 func initialGlobal(dbName string, onProperties func()) {
 	globalProps = properties.NewProperties()
 	if len(propertyFiles) > 0 {
@@ -112,6 +155,12 @@ func initialGlobal(dbName string, onProperties func()) {
 		onProperties()
 	}
 
+	profileCfg, err := parseRuntimeProfileConfigFromEnv()
+	if err != nil {
+		log.Fatalf("configure runtime profiling failed: %v", err)
+	}
+	applyRuntimeProfileConfig(profileCfg)
+
 	addr := globalProps.GetString(prop.DebugPprof, prop.DebugPprofDefault)
 	go func() {
 		http.ListenAndServe(addr, nil)
@@ -122,7 +171,6 @@ func initialGlobal(dbName string, onProperties func()) {
 	if len(tableName) == 0 {
 		tableName = globalProps.GetString(prop.TableName, prop.TableNameDefault)
 	}
-	var err error
 
 	if _, _, err = globalProps.Set(prop.TableName, tableName); err != nil {
 		panic(err)

@@ -717,7 +717,7 @@ func (coreCreator) Create(p *properties.Properties) (ycsb.Workload, error) {
 		}
 		opCount := p.GetInt64(prop.OperationCount, 0)
 		expectedNewKeys := int64(float64(opCount) * insertProportion * 2.0)
-		keyrangeUpperBound = insertStart + insertCount + expectedNewKeys
+		keyrangeUpperBound = keyrangeUpperBound + expectedNewKeys
 		keyrangeLowerBound, keyrangeUpperBound, partitionDesc = requestPartitionRange(keyrangeLowerBound, keyrangeUpperBound, partitionCount, partitionIndex, partitionSize)
 		c.keyChooser = generator.NewScrambledZipfian(keyrangeLowerBound, keyrangeUpperBound, generator.ZipfianConstant)
 	case "latest":

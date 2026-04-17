@@ -122,3 +122,28 @@ func TestRequestPartitionRange(t *testing.T) {
 		})
 	}
 }
+
+func TestZipfianPartitionUpperBoundDoesNotAddExtraKey(t *testing.T) {
+	p := properties.NewProperties()
+	p.SetValue("operationcount", "1000000000000")
+	p.SetValue("requestpartition.count", "80")
+	p.SetValue("requestpartition.index", "79")
+	p.SetValue("requestpartition.size", "100000000")
+	p.SetValue("insertproportion", "0")
+
+	keyrangeLowerBound := int64(0)
+	keyrangeUpperBound := int64(1000000000000 - 1)
+	partitionCount := p.GetInt64("requestpartition.count", 1)
+	partitionIndex := p.GetInt64("requestpartition.index", 0)
+	partitionSize := p.GetInt64("requestpartition.size", 0)
+	insertProportion := p.GetFloat64("insertproportion", 0)
+	opCount := p.GetInt64("operationcount", 0)
+	expectedNewKeys := int64(float64(opCount) * insertProportion * 2.0)
+	keyrangeUpperBound = keyrangeUpperBound + expectedNewKeys
+	keyrangeLowerBound, keyrangeUpperBound, _ = requestPartitionRange(
+		keyrangeLowerBound, keyrangeUpperBound, partitionCount, partitionIndex, partitionSize)
+
+	if keyrangeLowerBound != 999900000000 || keyrangeUpperBound != 999999999999 {
+		t.Fatalf("zipfian range = [%d %d], want [%d %d]", keyrangeLowerBound, keyrangeUpperBound, int64(999900000000), int64(999999999999))
+	}
+}
